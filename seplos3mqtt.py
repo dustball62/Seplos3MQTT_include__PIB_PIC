@@ -16,7 +16,9 @@ import serial
 import configparser
 import paho.mqtt.client as mqtt
 import os
-
+import time
+#import threading
+#import asyncio
 # --------------------------------------------------------------------------- #
 # configure the logging system
 # --------------------------------------------------------------------------- #
@@ -138,6 +140,17 @@ class SerialSnooper:
         #Pack Cells
         for i in range(1, 17):
             self.autodiscovery_sensor ( "voltage","measurement", "V", f"Cell {i}", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 1", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 2", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 3", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 4", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 5", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 6", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 7", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 8", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Ambient Temperature", unitIdentifier)
+        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Power Temperature", unitIdentifier)
+
 
         #Pack Status and Alarm
         self.autodiscovery_sensor ( "","", "", "Status", unitIdentifier)
@@ -234,10 +247,10 @@ class SerialSnooper:
                                 if self.trashdata:
                                     self.trashdata = False
                                     self.trashdataf += "]"
-                                    #log.info(self.trashdataf)
+                                    log.info(f"Trashed data, {self.trashdataf}")
                                 responce = True
 
-                                #### Pack Alarms and Status ###
+                                #### Pack Alarms and Status PIC Data###
                                 if readByteCount == 18:   
                                     if unitIdentifier not in self.batts_declared_set:
                                         self.autodiscovery_battery(unitIdentifier)
@@ -250,6 +263,29 @@ class SerialSnooper:
                                     elif (readData[8] >> 3) & 1: strStatus = "Full charge"
                                     elif (readData[8] >> 4) & 1: strStatus = "Standby mode"
                                     elif (readData[8] >> 5) & 1: strStatus = "Turn off"
+
+
+                                    #log.info(f"ReadData 0 {unitIdentifier}- , {(readData[0])}")
+                                    #log.info(f"ReadData 1 {unitIdentifier}- ,{(readData[1])}")
+                                    #log.info(f"ReadData 2 {unitIdentifier}- ,{(readData[2])}")
+                                    #log.info(f"ReadData 3 {unitIdentifier}- ,{(readData[3])}")
+                                    #log.info(f"ReadData 4 {unitIdentifier}- ,{(readData[4])}")
+                                    #log.info(f"ReadData 5 {unitIdentifier}- ,{(readData[5])}")
+                                    #log.info(f"ReadData 6 {unitIdentifier}- ,{(readData[6])}")
+                                    #log.info(f"ReadData 7 {unitIdentifier}- ,{(readData[7])}")
+                                    #log.info(f"ReadData 8 {unitIdentifier}- ,{(readData[8])}")
+                                    #log.info(f"ReadData 9 {unitIdentifier}- ,{(readData[9])}")
+                                    #log.info(f"ReadData 10 {unitIdentifier}- ,{(readData[10])}")
+                                    #log.info(f"ReadData 11 {unitIdentifier}- ,{(readData[11])}")
+                                    #log.info(f"ReadData 12 {unitIdentifier}- ,{(readData[12])}")
+                                    #log.info(f"ReadData 13 {unitIdentifier}- ,{(readData[13])}")
+                                    #log.info(f"ReadData 14 {unitIdentifier}- ,{(readData[14])}")
+                                    #log.info(f"ReadData 15 {unitIdentifier}- ,{(readData[15])}")
+                                    #log.info(f"ReadData 16 {unitIdentifier}- ,{(readData[16])}")
+                                    #log.info(f"ReadData 17 {unitIdentifier}- ,{(readData[17])}")
+                                    #log.info(f"ReadData 0 {unitIdentifier}",(readData[0]))
+                                    #log.info(f"ReadData 0 {unitIdentifier}",(readData[0]))
+                                    #log.info(f"ReadData 0 {unitIdentifier}",(readData[0]))
 
                                     self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/status", strStatus, retain=True)
                                     self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb09", readData[8], retain=True)
@@ -301,14 +337,51 @@ class SerialSnooper:
                                 celdas = {}
                                 if readByteCount == 52:   
                                     celda = 0
+                                    temp_var = 1
                                     ## HASS Autodiscovery 
                                     if unitIdentifier not in self.batts_declared_set:
                                         self.autodiscovery_battery(unitIdentifier)
+
                                         self.batts_declared_set.add(unitIdentifier)
 
-                                    for i in range(0, 32, 2):
+
+                                    for i in range(0, 52, 2):
                                         celda =  (((readData[i] << 8) | readData[i + 1]) / 1000.0)
-                                        self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_{int(i/2)+1}", celda, retain=True)
+                                        if i < 32:
+                                           if 1.0 < celda < 50: 
+                                              self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_{int(i/2)+1}", celda, retain=True)
+
+
+
+                                           #add Temperature for cells
+                                           #log.info(f"ReadData {i} - ,Batt {unitIdentifier}- Cell voltage {int(i/2)+1} - {celda}")
+                                           #for i in range(32, 52, 2):
+                                           #   celda =  (((readData[i] << 8) | readData[i + 1]) / 1000.0)
+
+                                        elif 32 <= i < 48:
+                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+                                           #log.info(f"ReadData {i} - ({readData[i] << 8}-{readData[i+1]} ,Batt {unitIdentifier}- Cell Temp {temp_var}- {cell_temp}")
+
+                                           if 0.1 < float(cell_temp)  < 100.0:
+                                              #log.info(f"ReadData {i} - ({readData[i] << 8}-{readData[i+1]} ,Batt {unitIdentifier}- Cell Temp {temp_var}- {cell_temp}")
+
+                                              self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_temperature_{temp_var}", cell_temp, retain=True)
+
+                                           temp_var = (temp_var + 1)
+                                        elif i == 48:
+                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+
+
+                                           #log.info(f"ReadData {i} - , Ambient Temp- {cell_temp}")
+                                           self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/ambient_temperature", cell_temp,  retain=True)
+                                        elif i == 50:
+                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+
+
+                                           #log.info(f"ReadData {i} - , Power Temp- {cell_temp}")
+                                           self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/power_temperature", cell_temp, retain=True)
+
+
 
                                 # Pack Main information #######################################
                                 if readByteCount == 36:   
@@ -483,7 +556,7 @@ def get_config_variable(name,default='mandatory'):
 
       # the environment variable uis not defined, find in file .ini
       config = configparser.ConfigParser()
-      config.read('/Seplos3MQTT/seplos3mqtt.ini')
+      config.read('seplos3mqtt.ini')
       if not config.sections():  # Verificar si se cargaron secciones
             raise FileNotFoundError()
 
@@ -524,7 +597,7 @@ def get_config_variable(name,default='mandatory'):
 if __name__ == "__main__":
     print(" ")
 
-
+    
     try:
         port = get_config_variable('serial')
         mqtt_server =  get_config_variable('mqtt_server')
@@ -536,12 +609,14 @@ if __name__ == "__main__":
 
         with SerialSnooper(port,mqtt_server, mqtt_port, mqtt_user, mqtt_pass) as sniffer:
             while True:
+                #time.sleep(3)
                 data = sniffer.read_raw()
                 sniffer.process_data(data)
+
     except Exception as e:
         print(f'Unexpected error: {e}')
         printHelp()
-
+#time.sleep(3)
 #Master: ID: 3, Read Input Registers: 0x04, Read address: 4096, Read Quantity: 18 //Pack Main information
 #Slave:  ID: 3, Read Input Registers: 0x04, Read byte count: 36, Read data: [14 94 f4 c9 56 f4 6d 60 01 a6 03 1b 03 e5 00 1a 0c dc 0b 7d 0c de 0c d9 0b 80 0b 77 00 00 00 46 00 46 03 e8]
 #Master: ID: 3, Read Input Registers: 0x04, Read address: 4352, Read Quantity: 26 //Pack Cells information

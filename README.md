@@ -2,7 +2,7 @@ I'm updating ferelarg's code to include addtional Pack information Parameters, a
 
 I run my code without DOCKER so I will not be updating any DOCKER parts.
 
-I could not have done this witout his initial work so thank to ferelarg.
+I could not have done this witout his initial work so thanks to ferelarg.
 
 Seplos3MQTT
 =============

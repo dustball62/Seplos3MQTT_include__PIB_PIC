@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 """
+Updated to inlcude temperatures
 Seplos BMSv3 to MQTT
 ---------------------------------------------------------------------------
 

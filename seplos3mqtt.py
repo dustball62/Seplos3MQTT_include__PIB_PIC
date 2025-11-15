@@ -145,10 +145,10 @@ class SerialSnooper:
         self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 2", unitIdentifier)
         self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 3", unitIdentifier)
         self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 4", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 5", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 6", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 7", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 8", unitIdentifier)
+        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 5", unitIdentifier)
+        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 6", unitIdentifier)
+        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 7", unitIdentifier)
+        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 8", unitIdentifier)
         self.autodiscovery_sensor ( "temperature","measurement", "°C", "Ambient Temperature", unitIdentifier)
         self.autodiscovery_sensor ( "temperature","measurement", "°C", "Power Temperature", unitIdentifier)
 
@@ -334,17 +334,15 @@ class SerialSnooper:
 
 
 
-                                           #add Temperature for cells
-                                           #log.info(f"ReadData {i} - ,Batt {unitIdentifier}- Cell voltage {int(i/2)+1} - {celda}")
-                                           #for i in range(32, 52, 2):
-                                           #   celda =  (((readData[i] << 8) | readData[i + 1]) / 1000.0)
+                                           #add Temperature for cells#####################################
+  
 
                                         elif 32 <= i < 48:
                                            cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
-                                           #log.info(f"ReadData {i} - ({readData[i] << 8}-{readData[i+1]} ,Batt {unitIdentifier}- Cell Temp {temp_var}- {cell_temp}")
+
 
                                            if 0.1 < float(cell_temp)  < 100.0:
-                                              #log.info(f"ReadData {i} - ({readData[i] << 8}-{readData[i+1]} ,Batt {unitIdentifier}- Cell Temp {temp_var}- {cell_temp}")
+
 
                                               self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_temperature_{temp_var}", cell_temp, retain=True)
 
@@ -353,13 +351,13 @@ class SerialSnooper:
                                            cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
 
 
-                                           #log.info(f"ReadData {i} - , Ambient Temp- {cell_temp}")
+
                                            self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/ambient_temperature", cell_temp,  retain=True)
                                         elif i == 50:
                                            cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
 
 
-                                           #log.info(f"ReadData {i} - , Power Temp- {cell_temp}")
+   
                                            self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/power_temperature", cell_temp, retain=True)
 
 

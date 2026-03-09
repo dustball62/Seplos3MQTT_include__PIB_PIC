@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 
 """
-Updated to inlcude temperatures
+Updated to include temperatures
+Updated to include range validation - out of range values are not published to MQTT
+Updated to throttle MQTT publishing to every 2 seconds (cache + flush approach)
 Seplos BMSv3 to MQTT
 ---------------------------------------------------------------------------
-
-
 """
 # --------------------------------------------------------------------------- #
 # import the various needed libraries
@@ -18,8 +18,7 @@ import configparser
 import paho.mqtt.client as mqtt
 import os
 import time
-#import threading
-#import asyncio
+
 # --------------------------------------------------------------------------- #
 # configure the logging system
 # --------------------------------------------------------------------------- #
@@ -55,23 +54,26 @@ class SerialSnooper:
         self.trashdata = False
         self.trashdataf = bytearray(0)
         self.batts_declared_set = set()
+        # Cache of topic -> value, flushed to MQTT every publish_interval seconds
+        self.mqtt_cache = {}
+        self.last_publish_time = 0.0
+        self.publish_interval = 2.0  # seconds
         # init the signal handler for a clean exit
         signal.signal(signal.SIGINT, self.signal_handler)
 
         log.info(f"Opening serial interface, port: {port} 19200 8N1 timeout: 0.001750")
         self.connection = serial.Serial(port=port, baudrate=19200, bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, timeout=0.001750)
         log.debug(self.connection)
-       
+
         self.mqtt_hass = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.mqtt_hass.username_pw_set(username=mqtt_user, password=mqtt_pass)
         try:
             log.info(f"Opening MQTT connection, server: {mqtt_server}\tport: {mqtt_port}")
-            self.mqtt_hass.connect(mqtt_server, mqtt_port) 
+            self.mqtt_hass.connect(mqtt_server, mqtt_port)
         except ConnectionRefusedError:
             print("Error: Unable to connect to MQTT server.")
         except Exception as e:
             print(f"MQTT Unexpected error: {str(e)}")
-
 
     def __enter__(self):
         return self
@@ -84,13 +86,12 @@ class SerialSnooper:
 
     def close(self):
         self.connection.close()
-    
+
     def read_raw(self, n=1):
         return self.connection.read(n)
-    
+
     # --------------------------------------------------------------------------- #
-    # configure a clean exit (even with the use of kill, 
-    # may be useful if saving the data to a file)
+    # configure a clean exit
     # --------------------------------------------------------------------------- #
     def signal_handler(self, sig, frame):
         for batt_number in self.batts_declared_set:
@@ -98,12 +99,38 @@ class SerialSnooper:
             self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{batt_number}/state", "offline", retain=True)
         print('\nGoodbye\n')
         sys.exit(0)
-    
+
     def to_lower_under(self, text):
         text = text.lower()
         text = text.replace(' ', '_')
         return text
 
+    # --------------------------------------------------------------------------- #
+    # Range validation helper - returns True if value is within [min_val, max_val]
+    # Logs a warning if the value is out of range so you can tune limits if needed
+    # --------------------------------------------------------------------------- #
+    def is_valid(self, value, min_val, max_val, label="value"):
+        if min_val <= value <= max_val:
+            return True
+        log.warning(f"Out of range: {label} = {value} (expected {min_val} to {max_val}) — not published")
+        return False
+
+    # --------------------------------------------------------------------------- #
+    # Cache a value for deferred MQTT publishing
+    # --------------------------------------------------------------------------- #
+    def cache_value(self, topic, value, retain=True):
+        self.mqtt_cache[topic] = (value, retain)
+
+    # --------------------------------------------------------------------------- #
+    # Flush the cache to MQTT if the publish interval has elapsed
+    # Call this from the main loop
+    # --------------------------------------------------------------------------- #
+    def flush_cache(self):
+        now = time.time()
+        if now - self.last_publish_time >= self.publish_interval:
+            for topic, (value, retain) in self.mqtt_cache.items():
+                self.mqtt_hass.publish(topic, value, retain=retain)
+            self.last_publish_time = now
 
     # --------------------------------------------------------------------------- #
     # Bufferise the data and call the decoder if the interframe timeout occur.
@@ -115,69 +142,64 @@ class SerialSnooper:
             return
         for dat in data:
             self.data.append(dat)
-    
-    def autodiscovery_battery (self, unitIdentifier):
+
+    def autodiscovery_battery(self, unitIdentifier):
         log.info(f"Sending autodiscovery block Battery {unitIdentifier}")
         #Pack Main
-        self.autodiscovery_sensor ( "voltage","measurement", "V", "Pack Voltage", unitIdentifier)
-        self.autodiscovery_sensor ( "current","measurement", "A", "Current", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "Ah", "Remaining Capacity", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "Ah", "Total Capacity", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "Ah", "Total Discharge Capacity", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "%", "SOC", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "%", "SOH", unitIdentifier)
-        self.autodiscovery_sensor ( "","measurement", "cycles", "Cycles", unitIdentifier)
-        self.autodiscovery_sensor ( "voltage","measurement", "V", "Average Cell Voltage", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Average Cell Temp", unitIdentifier)
-        self.autodiscovery_sensor ( "voltage","measurement", "V", "Max Cell Voltage", unitIdentifier)
-        self.autodiscovery_sensor ( "voltage","measurement", "V", "Min Cell Voltage", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Max Cell Temp", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Min Cell Temp", unitIdentifier)
-        self.autodiscovery_sensor ( "current","measurement", "A", "MaxDisCurt", unitIdentifier)
-        self.autodiscovery_sensor ( "current","measurement", "A", "MaxChgCurt", unitIdentifier)
-        self.autodiscovery_sensor ( "power","measurement", "W", "Power", unitIdentifier)
-        self.autodiscovery_sensor ( "voltage","measurement", "mV", "Cell Delta", unitIdentifier)
+        self.autodiscovery_sensor("voltage", "measurement", "V", "Pack Voltage", unitIdentifier)
+        self.autodiscovery_sensor("current", "measurement", "A", "Current", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "Ah", "Remaining Capacity", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "Ah", "Total Capacity", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "Ah", "Total Discharge Capacity", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "%", "SOC", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "%", "SOH", unitIdentifier)
+        self.autodiscovery_sensor("", "measurement", "cycles", "Cycles", unitIdentifier)
+        self.autodiscovery_sensor("voltage", "measurement", "V", "Average Cell Voltage", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Average Cell Temp", unitIdentifier)
+        self.autodiscovery_sensor("voltage", "measurement", "V", "Max Cell Voltage", unitIdentifier)
+        self.autodiscovery_sensor("voltage", "measurement", "V", "Min Cell Voltage", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Max Cell Temp", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Min Cell Temp", unitIdentifier)
+        self.autodiscovery_sensor("current", "measurement", "A", "MaxDisCurt", unitIdentifier)
+        self.autodiscovery_sensor("current", "measurement", "A", "MaxChgCurt", unitIdentifier)
+        self.autodiscovery_sensor("power", "measurement", "W", "Power", unitIdentifier)
+        self.autodiscovery_sensor("voltage", "measurement", "mV", "Cell Delta", unitIdentifier)
 
         #Pack Cells
         for i in range(1, 17):
-            self.autodiscovery_sensor ( "voltage","measurement", "V", f"Cell {i}", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 1", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 2", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 3", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 4", unitIdentifier)
-        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 5", unitIdentifier)
-        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 6", unitIdentifier)
-        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 7", unitIdentifier)
-        #self.autodiscovery_sensor ( "temperature","measurement", "°C", "Cell Temperature 8", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Ambient Temperature", unitIdentifier)
-        self.autodiscovery_sensor ( "temperature","measurement", "°C", "Power Temperature", unitIdentifier)
-
+            self.autodiscovery_sensor("voltage", "measurement", "V", f"Cell {i}", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Cell Temperature 1", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Cell Temperature 2", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Cell Temperature 3", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Cell Temperature 4", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Ambient Temperature", unitIdentifier)
+        self.autodiscovery_sensor("temperature", "measurement", "°C", "Power Temperature", unitIdentifier)
 
         #Pack Status and Alarm
-        self.autodiscovery_sensor ( "","", "", "Status", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB09", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB02", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB03", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB04", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB05", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB16", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB06", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB07", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB08", unitIdentifier)
-        self.autodiscovery_sensor ( "","", "", "TB15", unitIdentifier)
-        
+        self.autodiscovery_sensor("", "", "", "Status", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB09", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB02", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB03", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB04", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB05", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB16", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB06", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB07", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB08", unitIdentifier)
+        self.autodiscovery_sensor("", "", "", "TB15", unitIdentifier)
+
         log.info(f"Sending online signal for Battery {unitIdentifier}")
         self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/state", "online", retain=True)
 
-    def autodiscovery_sensor (self, dev_cla, state_class, sensor_unit, sensor_name, batt_number):
-        
-        name_under = self.to_lower_under (sensor_name)
+    def autodiscovery_sensor(self, dev_cla, state_class, sensor_unit, sensor_name, batt_number):
+
+        name_under = self.to_lower_under(sensor_name)
         if dev_cla != "": dev_cla = f""" "dev_cla": "{dev_cla}", """
         if state_class != "": state_class = f""" "stat_cla": "{state_class}", """
         if sensor_unit != "": sensor_unit = f""" "unit_of_meas": "{sensor_unit}", """
 
         mqtt_packet = f"""
-                        {{	 
+                        {{
                             "name": "{sensor_name}",
                             "stat_t": "{mqtt_prefix}/battery_{batt_number}/{name_under}",
                             "avty_t": "{mqtt_prefix}/battery_{batt_number}/state",
@@ -202,12 +224,12 @@ class SerialSnooper:
         self.mqtt_hass.publish(f"homeassistant/sensor/seplos_bms_{batt_number}/{name_under}/config", mqtt_packet, retain=True)
 
     # --------------------------------------------------------------------------- #
-    # Debuffer and decode the modbus frames (Request, Responce, Exception)
+    # Debuffer and decode the modbus frames (Request, Response, Exception)
     # --------------------------------------------------------------------------- #
     def decodeModbus(self, data):
         modbusdata = data
         bufferIndex = 0
-        
+
         while True:
             unitIdentifier = 0
             functionCode = 0
@@ -216,7 +238,7 @@ class SerialSnooper:
             crc16 = 0
             responce = False
             needMoreData = False
-            frameStartIndex = bufferIndex           
+            frameStartIndex = bufferIndex
             if len(modbusdata) > (frameStartIndex + 2):
                 # Unit Identifier (Slave Address)
                 unitIdentifier = modbusdata[bufferIndex]
@@ -225,22 +247,19 @@ class SerialSnooper:
                 functionCode = modbusdata[bufferIndex]
                 bufferIndex += 1
                 if functionCode == 1:
-                    # Responce size: UnitIdentifier (1) + FunctionCode (1) + ReadByteCount (1) + ReadData (n) + CRC (2)
-                    expectedLenght = 7 # 5 + n (n >= 2)
+                    # Response size: UnitIdentifier (1) + FunctionCode (1) + ReadByteCount (1) + ReadData (n) + CRC (2)
+                    expectedLenght = 7  # 5 + n (n >= 2)
                     if len(modbusdata) >= (frameStartIndex + expectedLenght):
                         bufferIndex = frameStartIndex + 2
-                        # Read Byte Count (1)
                         readByteCount = modbusdata[bufferIndex]
                         bufferIndex += 1
                         expectedLenght = (5 + readByteCount)
                         if len(modbusdata) >= (frameStartIndex + expectedLenght):
-                            # Read Data (n)
                             index = 1
                             while index <= readByteCount:
                                 readData.append(modbusdata[bufferIndex])
                                 bufferIndex += 1
                                 index += 1
-                            # CRC16 (2)
                             crc16 = (modbusdata[bufferIndex] * 0x0100) + modbusdata[bufferIndex + 1]
                             metCRC16 = self.calcCRC16(modbusdata, bufferIndex)
                             bufferIndex += 2
@@ -251,13 +270,13 @@ class SerialSnooper:
                                     log.info(f"Trashed data, {self.trashdataf}")
                                 responce = True
 
-                                #### Pack Alarms and Status PIC Data###
-                                if readByteCount == 18:   
+                                #### Pack Alarms and Status PIC Data ###
+                                if readByteCount == 18:
                                     if unitIdentifier not in self.batts_declared_set:
                                         self.autodiscovery_battery(unitIdentifier)
                                         self.batts_declared_set.add(unitIdentifier)
 
-                                    strStatus = "" 
+                                    strStatus = ""
                                     if   (readData[8] >> 0) & 1: strStatus = "Discharge"
                                     elif (readData[8] >> 1) & 1: strStatus = "Charge"
                                     elif (readData[8] >> 2) & 1: strStatus = "Floating charge"
@@ -265,20 +284,20 @@ class SerialSnooper:
                                     elif (readData[8] >> 4) & 1: strStatus = "Standby mode"
                                     elif (readData[8] >> 5) & 1: strStatus = "Turn off"
 
-
-
-
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/status", strStatus, retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb09", readData[8], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb02", readData[9], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb03", readData[10], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb04", readData[11], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb05", readData[12], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb16", readData[13], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb06", readData[14], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb07", readData[15], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb08", readData[16], retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/tb15", readData[17], retain=True)
+                                    # Status is a string — cache if non-empty
+                                    if strStatus:
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/status", strStatus)
+                                    # TB flags are raw bytes (0-255), always valid
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb09", readData[8])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb02", readData[9])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb03", readData[10])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb04", readData[11])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb05", readData[12])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb16", readData[13])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb06", readData[14])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb07", readData[15])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb08", readData[16])
+                                    self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/tb15", readData[17])
 
                                 modbusdata = modbusdata[bufferIndex:]
                                 bufferIndex = 0
@@ -286,24 +305,21 @@ class SerialSnooper:
                             needMoreData = True
                     else:
                         needMoreData = True
-                # FC03 (0x03) Read Holding Registers  FC04 (0x04) Read Input Registers
+
+                # FC04 (0x04) Read Input Registers
                 elif functionCode == 4:
-                    # Responce size: UnitIdentifier (1) + FunctionCode (1) + ReadByteCount (1) + ReadData (n) + CRC (2)
-                    expectedLenght = 7 # 5 + n (n >= 2)
+                    expectedLenght = 7
                     if len(modbusdata) >= (frameStartIndex + expectedLenght):
                         bufferIndex = frameStartIndex + 2
-                        # Read Byte Count (1)
                         readByteCount = modbusdata[bufferIndex]
                         bufferIndex += 1
                         expectedLenght = (5 + readByteCount)
                         if len(modbusdata) >= (frameStartIndex + expectedLenght):
-                            # Read Data (n)
                             index = 1
                             while index <= readByteCount:
                                 readData.append(modbusdata[bufferIndex])
                                 bufferIndex += 1
                                 index += 1
-                            # CRC16 (2)
                             crc16 = (modbusdata[bufferIndex] * 0x0100) + modbusdata[bufferIndex + 1]
                             metCRC16 = self.calcCRC16(modbusdata, bufferIndex)
                             bufferIndex += 2
@@ -311,105 +327,150 @@ class SerialSnooper:
                                 if self.trashdata:
                                     self.trashdata = False
                                     self.trashdataf += "]"
-                                    # log.info(self.trashdataf)
                                 responce = True
 
-                                # Cell Pack information #######################################
-                                celdas = {}
-                                if readByteCount == 52:   
-                                    celda = 0
+                                # Cell Pack information ###############################################
+                                if readByteCount == 52:
                                     temp_var = 1
-                                    ## HASS Autodiscovery 
                                     if unitIdentifier not in self.batts_declared_set:
                                         self.autodiscovery_battery(unitIdentifier)
-
                                         self.batts_declared_set.add(unitIdentifier)
-
 
                                     for i in range(0, 52, 2):
-                                        celda =  (((readData[i] << 8) | readData[i + 1]) / 1000.0)
+                                        raw_word = (readData[i] << 8) | readData[i + 1]
+
                                         if i < 32:
-                                           if 1.0 < celda < 50: 
-                                              self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_{int(i/2)+1}", celda, retain=True)
-
-
-
-                                           #add Temperature for cells#####################################
-  
+                                            # Cell voltages: valid range 2.5V – 3.65V for LiFePO4
+                                            celda = raw_word / 1000.0
+                                            cell_num = int(i / 2) + 1
+                                            if self.is_valid(celda, 2.5, 3.65, f"batt {unitIdentifier} cell_{cell_num} voltage"):
+                                                self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_{cell_num}", celda)
 
                                         elif 32 <= i < 48:
-                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+                                            # Cell temperatures: valid range -20°C – 80°C
+                                            cell_temp = round((float(raw_word - 2731) / 10), 2)
+                                            if self.is_valid(cell_temp, -20.0, 80.0, f"batt {unitIdentifier} cell_temperature_{temp_var}"):
+                                                self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_temperature_{temp_var}", cell_temp)
+                                            temp_var += 1
 
-
-                                           if 0.1 < float(cell_temp)  < 100.0:
-
-
-                                              self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_temperature_{temp_var}", cell_temp, retain=True)
-
-                                           temp_var = (temp_var + 1)
                                         elif i == 48:
-                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+                                            # Ambient temperature: valid range -20°C – 80°C
+                                            cell_temp = round((float(raw_word - 2731) / 10), 2)
+                                            if self.is_valid(cell_temp, -20.0, 80.0, f"batt {unitIdentifier} ambient_temperature"):
+                                                self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/ambient_temperature", cell_temp)
 
-
-
-                                           self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/ambient_temperature", cell_temp,  retain=True)
                                         elif i == 50:
-                                           cell_temp = round((float((readData[i] << 8 | readData[i +1]) - 2731) / 10), 2)
+                                            # Power/BMS temperature: valid range -20°C – 80°C
+                                            cell_temp = round((float(raw_word - 2731) / 10), 2)
+                                            if self.is_valid(cell_temp, -20.0, 80.0, f"batt {unitIdentifier} power_temperature"):
+                                                self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/power_temperature", cell_temp)
 
-
-   
-                                           self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/power_temperature", cell_temp, retain=True)
-
-
-
-                                # Pack Main information #######################################
-                                if readByteCount == 36:   
+                                # Pack Main information ###############################################
+                                if readByteCount == 36:
                                     readDataNumber = []
-
                                     for i in range(0, 36, 2):
                                         readDataNumber.append((readData[i] << 8) | readData[i + 1])
-                                    # HASS autodiscovery MQTT    
+
                                     if unitIdentifier not in self.batts_declared_set:
                                         self.autodiscovery_battery(unitIdentifier)
                                         self.batts_declared_set.add(unitIdentifier)
 
-                                    # Pack Voltage
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/pack_voltage", readDataNumber[0]/100.0, retain=True)
-                                    # Current
-                                    current_decimal = readDataNumber [1] if readDataNumber [1] <= 32767 else readDataNumber [1] - 65536
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/current", current_decimal/100.0, retain=True)
-                                    # Remaining Capacity
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/remaining_capacity", readDataNumber[2]/100.0, retain=True)
-                                    # Total Capacity
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/total_capacity", readDataNumber[3]/100.0, retain=True)
-                                    # Total Discharge Capacity
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/total_discharge_capacity", readDataNumber[4]*10, retain=True)
-                                    # SOC
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/soc", readDataNumber[5]/10.0, retain=True)
-                                    # SOH
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/soh", readDataNumber[6]/10.0, retain=True)
-                                    # Cycles
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cycles", readDataNumber[7], retain=True)
-                                    # Average Cell Voltage
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/average_cell_voltage", readDataNumber[8]/1000.0, retain=True)
-                                    # Average Cell Temp
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/average_cell_temp", round ((readDataNumber[9]/10 - 273.15) ,1), retain=True)
-                                    # Max Cell Voltage
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/max_cell_voltage", readDataNumber[10]/1000.0, retain=True)
-                                    # Min Cell Voltage
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/min_cell_voltage", readDataNumber[11]/1000.0, retain=True)
-                                    # Max Cell Temp
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/max_cell_temp", round ((readDataNumber[12]/10 - 273.15),1), retain=True)
-                                    # Min Cell Temp
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/min_cell_temp", round ((readDataNumber[13]/10 - 273.15),1), retain=True)
-                                    # Reserve readDataNumber [14]
-                                    # MaxDisCurt
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/maxdiscurt", readDataNumber[15], retain=True)
-                                    # MaxChgCurt
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/maxchgcurt", readDataNumber[16], retain=True)        
-                                    #Calculated Power end Delta
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/power", int(-(current_decimal/100.0)*(readDataNumber[0]/100.0)), retain=True)
-                                    self.mqtt_hass.publish(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_delta", int((readDataNumber[10]) - (readDataNumber[11])), retain=True)
+                                    # Pack Voltage: valid range 40V – 60V (16S LiFePO4)
+                                    pack_voltage = readDataNumber[0] / 100.0
+                                    if self.is_valid(pack_voltage, 40.0, 60.0, f"batt {unitIdentifier} pack_voltage"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/pack_voltage", pack_voltage)
+
+                                    # Current: valid range -500A – 500A (signed)
+                                    current_raw = readDataNumber[1] if readDataNumber[1] <= 32767 else readDataNumber[1] - 65536
+                                    current = current_raw / 100.0
+                                    if self.is_valid(current, -500.0, 500.0, f"batt {unitIdentifier} current"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/current", current)
+
+                                    # Remaining Capacity: valid range 0 – 10000 Ah
+                                    remaining_cap = readDataNumber[2] / 100.0
+                                    if self.is_valid(remaining_cap, 0.0, 10000.0, f"batt {unitIdentifier} remaining_capacity"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/remaining_capacity", remaining_cap)
+
+                                    # Total Capacity: valid range 0 – 10000 Ah
+                                    total_cap = readDataNumber[3] / 100.0
+                                    if self.is_valid(total_cap, 0.0, 10000.0, f"batt {unitIdentifier} total_capacity"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/total_capacity", total_cap)
+
+                                    # Total Discharge Capacity: valid range 0 – 100,000,000 Ah
+                                    total_dis_cap = readDataNumber[4] * 10
+                                    if self.is_valid(total_dis_cap, 0, 100000000, f"batt {unitIdentifier} total_discharge_capacity"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/total_discharge_capacity", total_dis_cap)
+
+                                    # SOC: valid range 0% – 100%
+                                    soc = readDataNumber[5] / 10.0
+                                    if self.is_valid(soc, 0.0, 100.0, f"batt {unitIdentifier} soc"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/soc", soc)
+
+                                    # SOH: valid range 0% – 100%
+                                    soh = readDataNumber[6] / 10.0
+                                    if self.is_valid(soh, 0.0, 100.0, f"batt {unitIdentifier} soh"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/soh", soh)
+
+                                    # Cycles: valid range 0 – 20000
+                                    cycles = readDataNumber[7]
+                                    if self.is_valid(cycles, 0, 20000, f"batt {unitIdentifier} cycles"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/cycles", cycles)
+
+                                    # Average Cell Voltage: valid range 2.5V – 3.65V
+                                    avg_cell_v = readDataNumber[8] / 1000.0
+                                    if self.is_valid(avg_cell_v, 2.5, 3.65, f"batt {unitIdentifier} average_cell_voltage"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/average_cell_voltage", avg_cell_v)
+
+                                    # Average Cell Temp: valid range -20°C – 80°C
+                                    avg_cell_temp = round((readDataNumber[9] / 10 - 273.15), 1)
+                                    if self.is_valid(avg_cell_temp, -20.0, 80.0, f"batt {unitIdentifier} average_cell_temp"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/average_cell_temp", avg_cell_temp)
+
+                                    # Max Cell Voltage: valid range 2.5V – 3.65V
+                                    max_cell_v = readDataNumber[10] / 1000.0
+                                    if self.is_valid(max_cell_v, 2.5, 3.65, f"batt {unitIdentifier} max_cell_voltage"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/max_cell_voltage", max_cell_v)
+
+                                    # Min Cell Voltage: valid range 2.5V – 3.65V
+                                    min_cell_v = readDataNumber[11] / 1000.0
+                                    if self.is_valid(min_cell_v, 2.5, 3.65, f"batt {unitIdentifier} min_cell_voltage"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/min_cell_voltage", min_cell_v)
+
+                                    # Max Cell Temp: valid range -20°C – 80°C
+                                    max_cell_temp = round((readDataNumber[12] / 10 - 273.15), 1)
+                                    if self.is_valid(max_cell_temp, -20.0, 80.0, f"batt {unitIdentifier} max_cell_temp"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/max_cell_temp", max_cell_temp)
+
+                                    # Min Cell Temp: valid range -20°C – 80°C
+                                    min_cell_temp = round((readDataNumber[13] / 10 - 273.15), 1)
+                                    if self.is_valid(min_cell_temp, -20.0, 80.0, f"batt {unitIdentifier} min_cell_temp"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/min_cell_temp", min_cell_temp)
+
+                                    # Reserve: readDataNumber[14] skipped
+
+                                    # MaxDisCurt: valid range 0A – 500A
+                                    max_dis_curt = readDataNumber[15]
+                                    if self.is_valid(max_dis_curt, 0, 500, f"batt {unitIdentifier} maxdiscurt"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/maxdiscurt", max_dis_curt)
+
+                                    # MaxChgCurt: valid range 0A – 500A
+                                    max_chg_curt = readDataNumber[16]
+                                    if self.is_valid(max_chg_curt, 0, 500, f"batt {unitIdentifier} maxchgcurt"):
+                                        self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/maxchgcurt", max_chg_curt)
+
+                                    # Calculated Power: valid range -30000W – 30000W
+                                    # Note: only publish if both current and voltage passed validation
+                                    if self.is_valid(current, -500.0, 500.0, "current (power calc)") and self.is_valid(pack_voltage, 40.0, 60.0, "voltage (power calc)"):
+                                        power = int(-(current) * pack_voltage)
+                                        if self.is_valid(power, -30000, 30000, f"batt {unitIdentifier} power"):
+                                            self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/power", power)
+
+                                    # Cell Delta: valid range 0mV – 1000mV
+                                    # Note: only publish if both max and min cell voltages passed validation
+                                    if self.is_valid(max_cell_v, 2.5, 3.65, "max_v (delta calc)") and self.is_valid(min_cell_v, 2.5, 3.65, "min_v (delta calc)"):
+                                        cell_delta = int(readDataNumber[10] - readDataNumber[11])
+                                        if self.is_valid(cell_delta, 0, 1000, f"batt {unitIdentifier} cell_delta"):
+                                            self.cache_value(f"{mqtt_prefix}/battery_{unitIdentifier}/cell_delta", cell_delta)
 
                                 modbusdata = modbusdata[bufferIndex:]
                                 bufferIndex = 0
@@ -422,7 +483,7 @@ class SerialSnooper:
 
             if needMoreData:
                 return modbusdata
-            elif  (responce == False):
+            elif responce == False:
                 if self.trashdata:
                     self.trashdataf += " {:02x}".format(modbusdata[frameStartIndex])
                 else:
@@ -438,8 +499,8 @@ class SerialSnooper:
     def calcCRC16(self, data, size):
         crcHi = 0XFF
         crcLo = 0xFF
-        
-        crcHiTable	= [	0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0,
+
+        crcHiTable = [  0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0,
                         0x80, 0x41, 0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41,
                         0x00, 0xC1, 0x81, 0x40, 0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0,
                         0x80, 0x41, 0x01, 0xC0, 0x80, 0x41, 0x00, 0xC1, 0x81, 0x40,
@@ -503,6 +564,7 @@ class SerialSnooper:
         metCRC16 = (crcHi * 0x0100) + crcLo
         return metCRC16
 
+
 # --------------------------------------------------------------------------- #
 # Print the usage help
 # --------------------------------------------------------------------------- #
@@ -525,49 +587,44 @@ def printHelp():
 # --------------------------------------------------------------------------- #
 # get variable config from environment or config file
 # --------------------------------------------------------------------------- #
+def get_config_variable(name, default='mandatory'):
+    try:
+        value = os.getenv(name)
+        if value is not None:
+            return value
 
-def get_config_variable(name,default='mandatory'):
-   try:
-      # try to get variable from environment
-      value = os.getenv(name)
-      if value is not None:
-         return value
-
-      # the environment variable uis not defined, find in file .ini
-      config = configparser.ConfigParser()
-      config.read('seplos3mqtt.ini')
-      if not config.sections():  # Verificar si se cargaron secciones
+        config = configparser.ConfigParser()
+        config.read('seplos3mqtt.ini')
+        if not config.sections():
             raise FileNotFoundError()
 
-      return config['seplos3mqtt'][name]
+        return config['seplos3mqtt'][name]
 
-   except configparser.NoSectionError as e:
-      if default != 'mandatory':
-         return default
-      else:
-         print(f'Error: Section [seplos3mqtt] not found in the file seplos3mqtt.ini for variable {name}, exception: {e}')
-         printHelp()
-         sys.exit()
-   except configparser.NoOptionError as e:
-       if default != 'mandatory':
-          return default
-       else:
-          print(f'Error: Parameter {name} not found in environment variable or in the file seplos3mqtt.ini Details: {e}')
-          printHelp()
-          sys.exit()
-   except FileNotFoundError as e:
+    except configparser.NoSectionError as e:
         if default != 'mandatory':
-           return default
+            return default
         else:
-           print(f'Error: seplos3mqtt.ini was not found or environment variable {name} not defined.')
-           printHelp()
-           sys.exit()
-   except Exception as e:
+            print(f'Error: Section [seplos3mqtt] not found in the file seplos3mqtt.ini for variable {name}, exception: {e}')
+            printHelp()
+            sys.exit()
+    except configparser.NoOptionError as e:
+        if default != 'mandatory':
+            return default
+        else:
+            print(f'Error: Parameter {name} not found in environment variable or in the file seplos3mqtt.ini Details: {e}')
+            printHelp()
+            sys.exit()
+    except FileNotFoundError as e:
+        if default != 'mandatory':
+            return default
+        else:
+            print(f'Error: seplos3mqtt.ini was not found or environment variable {name} not defined.')
+            printHelp()
+            sys.exit()
+    except Exception as e:
         print(f'Unexpected error: {e}')
         printHelp()
         sys.exit()
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -576,26 +633,24 @@ def get_config_variable(name,default='mandatory'):
 if __name__ == "__main__":
     print(" ")
 
-    
     try:
         port = get_config_variable('serial')
-        mqtt_server =  get_config_variable('mqtt_server')
-        mqtt_port = int(get_config_variable('mqtt_port',"1883"))
-        mqtt_user = get_config_variable('mqtt_user',"")
-        mqtt_pass = get_config_variable('mqtt_pass',"")
-        mqtt_prefix = get_config_variable('mqtt_prefix',"seplos")
-        
+        mqtt_server = get_config_variable('mqtt_server')
+        mqtt_port = int(get_config_variable('mqtt_port', "1883"))
+        mqtt_user = get_config_variable('mqtt_user', "")
+        mqtt_pass = get_config_variable('mqtt_pass', "")
+        mqtt_prefix = get_config_variable('mqtt_prefix', "seplos")
 
-        with SerialSnooper(port,mqtt_server, mqtt_port, mqtt_user, mqtt_pass) as sniffer:
+        with SerialSnooper(port, mqtt_server, mqtt_port, mqtt_user, mqtt_pass) as sniffer:
             while True:
-                #time.sleep(3)
                 data = sniffer.read_raw()
                 sniffer.process_data(data)
+                sniffer.flush_cache()
 
     except Exception as e:
         print(f'Unexpected error: {e}')
         printHelp()
-#time.sleep(3)
+
 #Master: ID: 3, Read Input Registers: 0x04, Read address: 4096, Read Quantity: 18 //Pack Main information
 #Slave:  ID: 3, Read Input Registers: 0x04, Read byte count: 36, Read data: [14 94 f4 c9 56 f4 6d 60 01 a6 03 1b 03 e5 00 1a 0c dc 0b 7d 0c de 0c d9 0b 80 0b 77 00 00 00 46 00 46 03 e8]
 #Master: ID: 3, Read Input Registers: 0x04, Read address: 4352, Read Quantity: 26 //Pack Cells information
